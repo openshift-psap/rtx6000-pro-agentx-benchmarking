@@ -1,0 +1,12 @@
+.env
+*.env
+!*.env.example
+*.kubeconfig
+kubeconfig
+credentials*
+runs/
+results/
+artifacts/
+__pycache__/
+*.py[cod]
+.DS_Store

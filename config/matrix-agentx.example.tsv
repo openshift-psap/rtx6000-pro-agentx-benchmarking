@@ -1,0 +1,8 @@
+case_id	policy	concurrency
+c2-agentic	agentic	2
+c8-agentic	agentic	8
+c16-agentic	agentic	16
+c32-agentic	agentic	32
+c64-agentic	agentic	64
+c96-agentic	agentic	96
+c128-agentic	agentic	128
