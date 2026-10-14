@@ -1,95 +1,183 @@
-# AgentX benchmark reproducibility
+# AgentX benchmark reproduction
 
-Portable scripts and instructions for running the AgentX inference workload with BenchFlow and AIPerf. The repository contains no benchmark results, logs, credentials, cluster exports, or local-machine paths.
+Clone this repository, point it at a running model endpoint and GPU topology, and run the included AgentX concurrency sweep. BenchFlow runs AIPerf; the scripts save the raw results and reject incomplete or invalid cases.
 
-## Scope
+## Before you start
 
-The runner is device-neutral: it sends the same configured workload to an OpenAI-compatible endpoint and validates AIPerf's exported result. A platform operator must provision the model-serving topology and routing policy first. Kubernetes APIs, GPU allocation, model storage, TLS, and GPU telemetry vary by platform; this repository does not pretend one deployment manifest works for all of them.
+Have these ready:
 
-The checked-in 30-minute profile and example configuration describe the Qwen3.8-27B AgentX experiment. Model, runtime image, tensor-parallel size, replica count, endpoint, and concurrency matrix are editable settings. The selected duration must match the pinned BenchFlow profile; changing it requires a profile revision in the pinned checkout and a matching profile copy in this repository.
+- A Linux or macOS runner with Bash, Git, `curl`, and network access to your model endpoint and Hugging Face. Windows users can run the commands from WSL2.
+- [`uv`](https://docs.astral.sh/uv/getting-started/installation/) to install the pinned Python and BenchFlow versions.
+- A model server already running on the GPUs you want to measure. It must expose an OpenAI-compatible API reachable from the runner, serve the model name you will configure, and accept requests at `/v1/chat/completions`. This quickstart measures that service; use your platform's serving instructions to start it.
+- The included profile requires a server context limit of at least 131,072 tokens. It sends streaming chat requests and expects server-reported token counts.
+- A persistent runner and writable persistent output directory for a multi-hour sweep. Do not run a long sweep in a laptop terminal or an ephemeral container.
 
-## End-to-end flow
+The included AgentX profile uses the public, pinned [Weka coding-agent trace dataset](https://huggingface.co/datasets/semianalysisai/cc-traces-weka-062126). AIPerf downloads and prepares it on the first run; you do not need to copy the dataset. The model tokenizer must also be accessible from the runner. If the model repository is gated, provide `HF_TOKEN` through your runner's secret manager or shell environment; do not put tokens in `config/run.env`. The profile fixes the input corpus; there is no separate dataset-path setting in this quickstart.
 
-```mermaid
-flowchart TD
-  A[Choose model, topology, policy, profile and concurrency matrix] --> B[Provision serving endpoint with platform-specific adapter]
-  B --> C[Verify ready replicas, image, GPU allocation and live router config]
-  C --> D[Start a durable runner on a cluster job or persistent worker]
-  D --> E[Resolve one BenchFlow run plan per matrix row]
-  E --> F[BenchFlow runs AIPerf against the endpoint]
-  F --> G[Validate complete, uncancelled, submission-valid, zero-error export]
-  G --> H[Collect and validate platform telemetry separately]
-  H --> I[Scale down serving resources and verify GPU release]
-  I --> J[Archive run artifacts and verify checksums]
+## 1. Clone this repository and the pinned BenchFlow source
+
+The runner checks that BenchFlow is at the exact [revision used for this profile](https://github.com/albertoperdomo2/benchflow/tree/854804914535d1df127d9825eb92fa2056eff71f). Keep the two checkouts side by side so the example `BENCHFLOW_REPO=../benchflow` works.
+
+```bash
+git clone https://github.com/ssaketh-ch/lenovo-agentx-reproducibility.git
+cd lenovo-agentx-reproducibility
+git clone https://github.com/albertoperdomo2/benchflow.git ../benchflow
+git -C ../benchflow checkout 854804914535d1df127d9825eb92fa2056eff71f
 ```
 
-BenchFlow launches AIPerf; the script does not call AIPerf directly. AgentX concurrency is the number of live session trees, including subagents, rather than a count of users.
+## 2. Install the runner tools
 
-## Quick start
+Install `uv` using one of its [official installation methods](https://docs.astral.sh/uv/getting-started/installation/):
 
-Requirements: Bash, Python 3, Git, BenchFlow (`bflow`), and access to a ready endpoint. Run the benchmark worker inside a durable environment for long profiles; closing a laptop terminal should not own the lifetime of a multi-hour sweep.
+```bash
+# macOS with Homebrew
+brew install uv
 
-1. Clone this repository and the BenchFlow fork. Check out the commit recorded in `config/run.env.example` (or the commit approved for your experiment).
-2. Copy `config/run.env.example` to `config/run.env`; edit it for your environment. Never put credentials in this file.
-3. Edit the tab-separated matrix in `config/matrix-agentx.example.tsv`, or point `MATRIX_FILE` at your own matrix. Each invocation uses one serving topology and processes rows serially.
-4. Provision the topology and EPP with your platform's reviewed deployment workflow. Verify that the effective router configuration matches the policy before benchmarking. In particular, an input `scheduler: {}` does not prove that the generated EPP is using an empty plugin set; inspect the live scheduler.
-5. Start `scripts/run-benchflow-matrix.sh` from a durable runner with the edited config path.
-6. Review each case's run plan, BenchFlow log, AIPerf export, validation log, and independently collected telemetry. A passing Kubernetes Job or healthy endpoint alone is not a valid benchmark.
-7. Scale down the serving service, confirm GPU resources are released, and archive the run directory to the approved durable store with checksums.
+# Linux or WSL2
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
-Example:
+uv --version
+```
+
+Then install Python 3.12 and the pinned BenchFlow checkout with its AIPerf support:
+
+```bash
+uv python install 3.12
+cd ../benchflow
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python -e '.[aiperf]'
+source .venv/bin/activate
+cd -
+bflow --help
+cmp profiles/aiperf-agentx-inference.yaml ../benchflow/profiles/benchmark/aiperf-agentx-inference.yaml
+```
+
+The `cmp` command should print nothing and exit successfully; it confirms the local profile is identical to the pinned source.
+
+The AIPerf dependency is pinned by this BenchFlow revision. You do not need to install or launch AIPerf separately: the matrix runner calls BenchFlow, and BenchFlow runs AIPerf. The first `bflow` command may take a little longer while Matplotlib builds its font cache.
+
+## 3. Start and confirm the model endpoint
+
+Start the model service on the target GPUs using your platform's serving workflow. Keep it running through the whole sweep. This repository's runner benchmarks an existing service; it does not create or resize the model deployment. There is no single safe deployment command for every model, GPU, and platform. List the deployment profiles in the pinned BenchFlow checkout with:
+
+```bash
+bflow profiles list --repo-root ../benchflow --kind deployment
+bflow profiles show rhaiis-raw-vllm --repo-root ../benchflow --kind deployment
+```
+
+The example profile is [`rhaiis-raw-vllm`](https://github.com/albertoperdomo2/benchflow/blob/854804914535d1df127d9825eb92fa2056eff71f/profiles/deployment/rhaiis/raw-vllm.yaml). For vLLM server options, see the [vLLM OpenAI-compatible server guide](https://docs.vllm.ai/en/latest/serving/openai_compatible_server/).
+
+`TARGET_URL` is the endpoint root, without `/v1/models` or `/v1/chat/completions` appended. Confirm that the endpoint responds from the same machine or container that will run the benchmark:
+
+```bash
+curl --fail --silent --show-error https://YOUR_ENDPOINT/v1/models
+```
+
+The response must list the model ID you will set as `MODEL_ID`. The runner does not configure an API key, so the endpoint must be reachable without an API-key prompt. For HTTPS, the runner must trust the endpoint's certificate; keep TLS verification enabled unless you intentionally accept that risk.
+
+## 4. Set the workload, topology, and output location
+
+Copy the examples and edit them:
 
 ```bash
 cp config/run.env.example config/run.env
-# Edit config/run.env and the matrix before running.
+cp config/matrix-agentx.example.tsv config/my-matrix.tsv
+${EDITOR:-vi} config/run.env
+${EDITOR:-vi} config/my-matrix.tsv
+```
+
+In `config/run.env`, set these values for the already-running service:
+
+| Setting | Set it to |
+|---|---|
+| `RUN_ID` | A unique name for this run. A run ID can only be used once because existing output is never overwritten. |
+| `NAMESPACE` | The namespace used by your BenchFlow/platform setup. |
+| `MODEL_ID` | The exact model ID returned by `/v1/models`. |
+| `RUNTIME_IMAGE` | The image running the model server; this is recorded in the resolved run plan and run metadata. |
+| `DEPLOYMENT_PROFILE` | The `metadata.name` from the BenchFlow deployment profile that describes your platform. List available profiles with `bflow profiles list --kind deployment`; the example uses `rhaiis-raw-vllm`. |
+| `BENCHFLOW_REPO` and `BENCHFLOW_COMMIT` | Keep `../benchflow` and the pinned commit unless you intentionally port the matching profile and update its local copy. |
+| `BENCHMARK_PROFILE` | Keep `aiperf-agentx-inference` for the included AgentX workload. |
+| `EXPECTED_DURATION_SECONDS` | Keep `1800` for the included 30-minute profile. If you change the profile duration, set the same value here. |
+| `TARGET_URL` | The base URL reachable from the runner, such as `https://model.example.net`. |
+| `TARGET_PATH` | The readiness URL path; use `/v1/models` for an OpenAI-compatible server. |
+| `TP_SIZE` | GPUs assigned to each model replica in the service that is already running. The runner records this value; it does not allocate GPUs. |
+| `REPLICAS` | Number of replicas already running. The runner records this value; it does not scale the service. |
+| `MATRIX_FILE` | `config/my-matrix.tsv`. |
+| `OUTPUT_ROOT` | A writable persistent directory. Use an absolute path on a mounted volume when running in a container. |
+
+Leave the remaining example flags unchanged for the first run: `NO_RHOAI_AUTH=true` skips Red Hat OpenShift AI-specific authentication, `NO_MLFLOW=true` keeps outputs in `OUTPUT_ROOT`, `DISABLE_AIPERF_SERVER_METRICS=true` disables AIPerf's own server-metrics polling, and `AIPERF_HTTP_SSL_VERIFY=true` verifies HTTPS certificates. The optional NVIDIA sampler collects vLLM and DCGM metrics separately. Change the server-metrics flag to `false` only if you want AIPerf to poll the endpoint's server metrics as well.
+
+`TP_SIZE` and `REPLICAS` must describe the service that is actually running. For example, a four-replica TP2 layout uses `TP_SIZE=2` and `REPLICAS=4`; an eight-replica TP1 layout uses `TP_SIZE=1` and `REPLICAS=8`. Start a new run with a unique `RUN_ID` for each topology. The matrix TSV has one row per serial measurement: `case_id`, `policy`, and `concurrency`. The example covers Agentic EPP at concurrency 2, 8, 16, 32, 64, 96, and 128. Here, concurrency means simultaneously live AgentX session trees, including spawned subagents. Change the rows to select your concurrency points. To use your own input corpus, create a matching BenchFlow profile and update the validator's AgentX-specific submission checks; changing a data path alone is not supported.
+
+For the included workload, the corpus, 30-minute duration, and seed are set in [`profiles/aiperf-agentx-inference.yaml`](profiles/aiperf-agentx-inference.yaml), copied byte-for-byte from the [pinned BenchFlow profile](https://github.com/albertoperdomo2/benchflow/blob/854804914535d1df127d9825eb92fa2056eff71f/profiles/benchmark/aiperf-agentx-inference.yaml). To use another profile for the same AgentX scenario, set `BENCHMARK_PROFILE` to its name and place a byte-identical profile at `profiles/<name>.yaml`; the runner compares that file with the pinned BenchFlow checkout before running. The included validity checker requires AIPerf's `inferencex-agentx-mvp` scenario and `submission_valid=true`. See the [AIPerf v0.12.0 AgentX guide](https://github.com/ai-dynamo/aiperf/blob/v0.12.0/docs/tutorials/agentx-mvp.md) before changing the workload.
+
+### EPP policies in the matrix
+
+- `agentic` sends `EPP-Profile: agentic` and enables AIPerf's session-ID header. Your live router must define that profile and support session affinity.
+- `no_default` sends no EPP profile header. Before using it, configure the server's router as intended and inspect the **live generated** EPP configuration. An input `scheduler: {}` alone does not prove the generated EPP has no plugins.
+
+## 5. Run the matrix
+
+Run this from the repository root on the persistent runner. If this is a new terminal, activate the BenchFlow environment first:
+
+```bash
+source ../benchflow/.venv/bin/activate
 bash scripts/run-benchflow-matrix.sh config/run.env
 ```
 
-The output root is configured in `run.env`; the runner refuses to reuse an existing run ID. Outputs are ignored by Git.
+Cases run one at a time. The runner resolves and saves a BenchFlow RunPlan, executes `bflow benchmark run`, validates the AIPerf export, and stops at the first failed or invalid case. It never retries a case or overwrites an existing run directory. The first case can spend several minutes downloading and preparing the trace corpus, then warms the server before its 30-minute measurement. Let the command finish; interrupting AIPerf makes that case invalid.
 
-## Matrix format
+## 6. Check the results
 
-`case_id`, `policy`, and `concurrency` are tab-separated columns. Supported policies are:
+The run ID is printed when execution starts. Results are under:
 
-- `agentic`: sends `EPP-Profile: agentic` and enables the AgentX session-ID correlation setting in the resolved AIPerf plan.
-- `no_default`: sends no EPP profile header. The endpoint must already have the intended `scheduler: {}` configuration, and the live generated EPP must be checked independently. This policy name does not configure the server.
+```text
+<OUTPUT_ROOT>/<RUN_ID>/
+├── profile.yaml
+├── matrix.tsv
+├── summary.tsv
+├── runner.log
+├── events.tsv
+├── metadata.txt
+└── cases/<case_id>/
+    ├── runplan.json
+    ├── benchflow.log
+    ├── resolve.log
+    ├── metadata.txt
+    ├── validation.log
+    └── results/**/profile_export_aiperf.json
+```
 
-Do not substitute weighted Agentic results for `no_default`. If your platform transforms the scheduler configuration, stop and resolve that before measuring.
+From the repository root, load the same configuration and inspect the generated run directory:
 
-## What is and is not automated
+```bash
+set -a
+source config/run.env
+set +a
+RUN_DIR="$OUTPUT_ROOT/$RUN_ID"
+cat "$RUN_DIR/summary.tsv"
+find "$RUN_DIR/cases" -type f -name profile_export_aiperf.json \
+  -exec python3 scripts/validate_aiperf.py {} \;
+```
 
-| Step | Included here |
-|---|---|
-| BenchFlow plan resolution and serial execution | `scripts/run-benchflow-matrix.sh` |
-| AIPerf result validity gate | `scripts/validate_aiperf.py` |
-| NVIDIA DCGM plus per-pod vLLM scraper from the captured run | `adapters/nvidia/metrics-sampler.py` (optional; NVIDIA/OpenShift-specific) |
-| Creating a model service, assigning devices, configuring EPP, TLS and storage | Platform-specific; use the platform's reviewed deployment workflow |
-| Uploading to S3 or another archive | Deliberately not automated; configure your approved identity and no-overwrite policy |
+A valid case must be complete, not cancelled, have `metadata.submission_valid=true`, have a positive request count, have matching completed and requested counts, and report zero errors. The validation command exits nonzero if any condition fails. A valid AIPerf export does not by itself prove that platform GPU telemetry was collected.
 
-The example matches the captured run's `no_server_metrics=true` setting. It defaults AIPerf TLS verification to enabled even though the archived profile sets it to false; the source run targeted an HTTP endpoint, so that setting did not affect its traffic. For HTTPS endpoints, keep verification enabled and provide the platform CA when needed. The NVIDIA sampler records raw vLLM and DCGM exposition and scrape status, separately from AIPerf result validation. Other devices need their own telemetry adapter; do not interpret missing telemetry as zero utilization.
+After the matrix, stop the model service using the same platform workflow that started it, and confirm the GPUs have been released.
 
-## Validity gate
+## Optional: NVIDIA/OpenShift telemetry
 
-The AIPerf `profile_export_aiperf.json` must report all of the following:
+For NVIDIA clusters, this repository includes a sampler for per-pod vLLM metrics and NVIDIA DCGM GPU metrics. It requires the [OpenShift CLI](https://docs.openshift.com/container-platform/latest/cli_reference/openshift_cli/getting-started-cli.html), a logged-in `oc` context, permission to read the serving and DCGM exporter pods, and network access from the sampler to their pod IPs. Check `oc whoami` and `oc project YOUR_NAMESPACE` first. Run the sampler in a second shell while the service is up; provide your cluster-specific values:
 
-- `is_complete: true`
-- `was_cancelled: false`
-- `metadata.submission_valid: true`
-- `metadata.scenario: inferencex-agentx-mvp`
-- positive `request_count`
-- matching `completed_request_count`
-- zero `error_request_count` and `request_error_rate`
+```bash
+python3 adapters/nvidia/metrics-sampler.py --interval 30 \
+  --namespace YOUR_NAMESPACE \
+  --selector 'YOUR_SERVING_POD_LABEL_SELECTOR' \
+  --node YOUR_GPU_NODE \
+  --replicas YOUR_REPLICA_COUNT \
+  --gpu-total YOUR_TOTAL_GPUS \
+  --service-fqdn YOUR_SERVICE.YOUR_NAMESPACE.svc \
+  --ca-bundle /path/to/cluster-ca.crt \
+  --output /path/to/OUTPUT_ROOT/RUN_ID/telemetry
+```
 
-The runner stops at the first invalid case and preserves its output for diagnosis. It does not retry a case or continue the queue automatically, avoiding accidental duplicate measurements.
-
-## Repository contents
-
-- `config/`: editable, non-secret run settings and a small example matrix.
-- `profiles/`: the AgentX profile used by the captured Qwen3.8 run.
-- `scripts/`: serial BenchFlow runner and AIPerf validity checker.
-- `adapters/nvidia/`: optional NVIDIA-specific Prometheus/DCGM sampler.
-- `tests/`: a small synthetic check for the validity gate; no measured output is included.
-
-## Provenance
-
-The profile and optional NVIDIA sampler were taken from the archived successful Lenovo AgentX run. The full historical launcher was not copied: it embeds Lenovo namespace, service, route, PVC, model-cache, node, and cluster assumptions. This repository replaces that environment-specific launcher with a configurable benchmark runner and clearly leaves serving deployment to a platform adapter.
+Stop the sampler with `Ctrl+C` after benchmarking. It writes raw `.prom` snapshots, `scrapes.tsv`, and a sampler summary alongside the AIPerf results. See [`adapters/nvidia/README.md`](adapters/nvidia/README.md) for field meanings and requirements. Other accelerator vendors need their own telemetry collection method.
