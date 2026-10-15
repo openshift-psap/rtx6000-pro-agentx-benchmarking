@@ -14,6 +14,7 @@ This quickstart uses BenchFlow's CLI directly against a model service that is al
 
 Have these ready:
 
+- The benchmark environment used **OCP 4.22 + Red Hat OpenShift AI (RHOAI) 3.6-ea1** on the **beta** channel. See the [platform installation notes](docs/platform-setup.md) for setup details. The standalone benchmark runner can also target an existing OpenAI-compatible model service.
 - A Linux or macOS runner with Bash, Git, `curl`, and network access to your model endpoint and Hugging Face. Windows users can run the commands from WSL2.
 - [`uv`](https://docs.astral.sh/uv/getting-started/installation/) to install the pinned Python and BenchFlow versions.
 - A model server already running on the GPUs you want to measure. It must expose an OpenAI-compatible API reachable from the runner, serve the model name you will configure, and accept requests at `/v1/chat/completions`. This quickstart measures that service; use your platform's serving instructions to start it.
