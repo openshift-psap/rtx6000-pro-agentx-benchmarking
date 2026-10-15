@@ -1,6 +1,14 @@
-# AgentX benchmark reproduction
+# RTX PRO 6000 AgentX benchmarking
 
-Clone this repository, point it at a running model endpoint and GPU topology, and run the included AgentX concurrency sweep. BenchFlow runs AIPerf; the scripts save the raw results and reject incomplete or invalid cases.
+This repository reproduces AgentX inference benchmarks against an already-running model service. Configure the endpoint and GPU topology, then run a serial concurrency sweep. The scripts preserve per-case plans and raw results, and reject incomplete or invalid measurements.
+
+## Why this repo uses BenchFlow
+
+[BenchFlow](https://github.com/albertoperdomo2/benchflow/tree/854804914535d1df127d9825eb92fa2056eff71f) is a framework for defining and executing repeatable LLM inference benchmarks. Its versioned profiles describe the workload; its resolver combines a profile with the model, endpoint, and topology to produce a concrete `RunPlan`; and its AIPerf backend turns that plan into an AIPerf run and saves the output. AIPerf generates the load. BenchFlow supplies the profile-based setup and execution path around it.
+
+This project uses BenchFlow because the AgentX workload already has a pinned profile and supported AIPerf integration there. Reusing that path avoids translating the profile into a second, hand-maintained AIPerf command. Pinning BenchFlow and checking the copied profile against its source keeps the workload definition and execution code aligned. The matrix script adds the pieces specific to this sweep: serial case ordering, policy headers, per-case artifacts, and acceptance checks.
+
+This quickstart uses BenchFlow's CLI directly against a model service that is already running. It does not bootstrap BenchFlow's broader OpenShift control plane, create the model deployment, or send results to MLflow.
 
 ## Before you start
 
@@ -19,8 +27,8 @@ The included AgentX profile uses the public, pinned [Weka coding-agent trace dat
 The runner checks that BenchFlow is at the exact [revision used for this profile](https://github.com/albertoperdomo2/benchflow/tree/854804914535d1df127d9825eb92fa2056eff71f). Keep the two checkouts side by side so the example `BENCHFLOW_REPO=../benchflow` works.
 
 ```bash
-git clone https://github.com/ssaketh-ch/lenovo-agentx-reproducibility.git
-cd lenovo-agentx-reproducibility
+git clone https://github.com/openshift-psap/rtx6000-pro-agentx-benchmarking.git
+cd rtx6000-pro-agentx-benchmarking
 git clone https://github.com/albertoperdomo2/benchflow.git ../benchflow
 git -C ../benchflow checkout 854804914535d1df127d9825eb92fa2056eff71f
 ```
